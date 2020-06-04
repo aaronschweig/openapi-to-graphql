@@ -23,6 +23,7 @@ import {
   OperationObject,
   ParameterObject,
   OpenAPIObject,
+  RequestBodyObject,
 } from './openapi.interface';
 import axios from 'axios';
 import { ApolloServer } from 'apollo-server';
@@ -58,6 +59,35 @@ const extractGetOrDeleteRequest = (
   type: requstObject.get ? 'get' : 'delete',
 });
 
+const extractPostPatchOrPutRequest = (
+  requstObject: PathItemObject
+): {
+  req: OperationObject | undefined;
+  type: 'post' | 'patch' | 'put';
+}[] => {
+  let response = [];
+  if (requstObject.post) {
+    response.push({
+      req: requstObject.post,
+      type: 'post',
+    });
+  }
+  if (requstObject.patch) {
+    response.push({
+      req: requstObject.patch,
+      type: 'patch',
+    });
+  }
+  if (requstObject.put) {
+    response.push({
+      req: requstObject.put,
+      type: 'put',
+    });
+  }
+
+  return response as any;
+};
+
 const extractResponse = (
   opObject: OperationObject,
   resposeCode: string = '200'
@@ -69,6 +99,19 @@ const extractParameters = (par: ParameterObject[]) =>
     name: p.name,
     type: parseGQLType(p.schema ?? {}, p.required!),
   }));
+
+const extractRequestBody = (reqBody: RequestBodyObject) => {
+  const type = parseGQLType(
+    reqBody?.content['application/json'].schema ?? {},
+    reqBody?.required ?? false
+  );
+  return [
+    {
+      name: (type as any).name ?? 'a_',
+      type,
+    },
+  ];
+};
 
 const replacePathParamWithArg = (path: string, args: any) =>
   path.replace(/{([a-zA-z]+)}/, (sub) => args[sub.replace(/[{}]/g, '')]);
@@ -160,6 +203,7 @@ const paths = openapi.paths;
 
 const queryFields = Object.keys(openapi.paths ?? {})
   .map((k) => {
+    // Refactorn mit neuem Array Ansatz
     const { req, type: reqType } = extractGetOrDeleteRequest((paths as any)[k]);
     if (!req) {
       return;
@@ -193,19 +237,69 @@ const queryFields = Object.keys(openapi.paths ?? {})
   })
   .reduce(reduceArrayToObject, {});
 
+const mutationFields = Object.keys(paths)
+  .flatMap((k) => {
+    const types = extractPostPatchOrPutRequest((paths as any)[k]);
+    if (!types.length) {
+      return;
+    }
+
+    return types.map(({ req, type }) => {
+      if (!req) {
+        return;
+      }
+      const pathParams = extractParameters(req?.parameters ?? []);
+      const bodyParams = extractRequestBody(req.requestBody!);
+      const params = [...pathParams, ...bodyParams].reduce(
+        (prev: any, curr: any) => {
+          prev[curr.name.replace('-', '_')] = { type: curr.type };
+          return prev;
+        },
+        {}
+      );
+
+      const response = extractResponse(req ?? {}) ?? {};
+
+      return {
+        [req.operationId ?? '']: {
+          args: params,
+          type: parseGQLType(response, false),
+          resolve: async (_source, args, ctx, _info) => {
+            const path = replacePathParamWithArg(k, args);
+            const { data } = await axios[type](
+              'http://localhost:3000' + path,
+              args[
+                Object.keys(args).find((k) => k.toLowerCase().includes('dto'))!
+              ],
+              {
+                headers: {
+                  authorization: ctx.req.headers.authorization,
+                },
+              }
+            );
+            return data;
+          },
+        } as GraphQLFieldConfig<any, any>,
+      };
+    });
+  })
+  .filter((k) => !!k)
+  .reduce(reduceArrayToObject, {});
+
 // Mutations noch parsen: requestBody und die Responses von dort
 
 const rawSchema = new GraphQLSchema({
   query: new GraphQLObjectType({ name: 'Query', fields: queryFields }),
+  mutation: new GraphQLObjectType({ name: 'Mutation', fields: mutationFields }),
   types: parsedTypes,
 });
 
-// const server = new ApolloServer({
-//   schema: rawSchema,
-//   context: ({ req }) => ({ req }),
-// });
+const server = new ApolloServer({
+  schema: rawSchema,
+  context: ({ req }) => ({ req }),
+});
 
-// server.listen(3001).then(() => console.log('READY'));
+server.listen(3001).then(() => console.log('READY'));
 
 const gqlSchema = printSchema(rawSchema);
 
