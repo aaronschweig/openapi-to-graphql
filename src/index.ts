@@ -1,5 +1,4 @@
 import openapi from './openapi.json';
-import { getSchema } from './get-schema';
 import {
   GraphQLString,
   GraphQLScalarType,
@@ -23,6 +22,7 @@ import {
   PathItemObject,
   OperationObject,
   ParameterObject,
+  OpenAPIObject,
 } from './openapi.interface';
 import axios from 'axios';
 import { ApolloServer } from 'apollo-server';
@@ -46,7 +46,17 @@ const reduceArrayToObject = (prev: any, curr: any) => {
   return prev;
 };
 
-const extractGetRequest = (requstObject: PathItemObject) => requstObject.get;
+const getSchema = (config: OpenAPIObject) => config?.components?.schemas ?? {};
+
+const extractGetOrDeleteRequest = (
+  requstObject: PathItemObject
+): {
+  req: OperationObject | undefined;
+  type: 'get' | 'delete';
+} => ({
+  req: requstObject.get || requstObject.delete,
+  type: requstObject.get ? 'get' : 'delete',
+});
 
 const extractResponse = (
   opObject: OperationObject,
@@ -150,7 +160,7 @@ const paths = openapi.paths;
 
 const queryFields = Object.keys(openapi.paths ?? {})
   .map((k) => {
-    const req = extractGetRequest((paths as any)[k]);
+    const { req, type: reqType } = extractGetOrDeleteRequest((paths as any)[k]);
     if (!req) {
       return;
     }
@@ -168,11 +178,14 @@ const queryFields = Object.keys(openapi.paths ?? {})
         resolve: async (_source, args, ctx, _info) => {
           const path = replacePathParamWithArg(k, args);
           // TODO: use OpenAPI.server als Config für den endpoint
-          const { data } = await axios.get('http://localhost:3000' + path, {
-            headers: {
-              authorization: ctx.req.headers.authorization,
-            },
-          });
+          const { data } = await axios[reqType](
+            'http://localhost:3000' + path,
+            {
+              headers: {
+                authorization: ctx.req.headers.authorization,
+              },
+            }
+          );
           return data;
         },
       } as GraphQLFieldConfig<any, any>,
